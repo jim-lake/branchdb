@@ -1,0 +1,29 @@
+{
+  "name": "branchdb",
+  "version": "0.1.0",
+  "description": "Branching database",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "compile-grammar": "pegjs --trace --cache --allowed-start-rules 'start,start_streaming' --output lib/grammar.js lib/grammar.pegjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jim-lake/branchdb.git"
+  },
+  "author": "Jim Lake",
+  "license": "ASK",
+  "bugs": {
+    "url": "https://github.com/jim-lake/brancdb/issues"
+  },
+  "homepage": "https://github.com/jim-lake/branchdb",
+  "dependencies": {
+    "async": "^2.6.0",
+    "lodash": "^4.17.5",
+    "node-postgres-server": "^1.1.1"
+  },
+  "devDependencies": {
+    "pegjs": "^0.11.0-dev.225"
+  }
+}

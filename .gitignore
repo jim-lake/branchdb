@@ -1,0 +1,6 @@
+xcuserdata
+node_modules
+.DS_Store
+project.xcworkspace
+package-lock.json
+/config*.json
