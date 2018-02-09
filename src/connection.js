@@ -3,6 +3,7 @@
 const async = require('async');
 const parser = require('./parser.js');
 const Transaction = require('./transaction.js');
+const Commit = require('./commit.js');
 const data_store = require('./data_store.js');
 const pg_errors = require('./pg_errors.js');
 
@@ -13,6 +14,10 @@ function Connection(pg_client) {
     this._pg_client = pg_client;
     this._transaction = false;
     this._is_auto_commit = true;
+    this._database = false;
+    this._search_path = ['public'];
+    this._commit = new Commit(0);
+    this._user_name = "";
     this._addListeners();
   } else {
     return new Connection(pg_client);
@@ -20,6 +25,21 @@ function Connection(pg_client) {
 }
 Connection.prototype.isAutoCommit = function() {
   return this._is_auto_commit;
+};
+Connection.prototype.getSearchPath = function() {
+  return this._search_path;
+};
+Connection.prototype.getCommit = function() {
+  return this._commit;
+};
+Connection.prototype.getDatabase = function() {
+  return this._database;
+};
+Connection.prototype.getUserName = function() {
+  return this._user_name;
+};
+Connection.prototype.setCommit = function(commit) {
+  this._commit = commit;
 };
 
 Connection.prototype._onQuery = function(query) {
@@ -29,6 +49,7 @@ Connection.prototype._onQuery = function(query) {
     async.eachSeries(ast.statement,(s,done) => {
       this._transactStatement(s,(err,result) => {
         if (err) {
+          console.log("Connection._onQuery: transact error:",err);
           this._pg_client.sendErrorResponse(err);
         } else {
           const { format_list, row_list, } = result;
@@ -54,8 +75,14 @@ Connection.prototype._onQuery = function(query) {
     if (this._transaction) {
       this._transaction.abort();
     }
-
-    const err = pg_errors.get('SYNTAX_ERROR',"Syntax error: " + e);
+    let err;
+    if (e instanceof parser.SyntaxError) {
+      console.error("Connection._onQuery: syntax error for query:",query);
+      err = pg_errors.get('SYNTAX_ERROR',"Syntax error: " + e);
+    } else {
+      console.error("Connection._onQuery: internal error:",e.stack);
+      err = pg_errors.internal(e);
+    }
     this._pg_client.sendErrorResponse(err);
     this._pg_client.sendReadyForQuery();
   }
@@ -124,6 +151,7 @@ Connection.prototype._executeStatement = function(statement,done) {
   const params = {
     client: this,
     transaction: this._transaction,
+    database: this._database,
     statement,
   };
 
@@ -141,8 +169,8 @@ Connection.prototype._executeStatement = function(statement,done) {
       break;
     }
     case "transaction:commit": {
-      this._transaction.commit((err,result) => {
-        done(err,{ cmd: result });
+      this._transaction.commit((err,result,commit_id) => {
+        done(err,{ cmd: result, oid: commit_id });
       });
       break;
     }
@@ -162,6 +190,38 @@ Connection.prototype._executeStatement = function(statement,done) {
       });
       break;
     }
+    case "variable:show": {
+      const name = statement.target;
+      this._showVariable(name,done);
+      break;
+    }
+    case "variable:set": {
+      const name = statement.target;
+      const value = statement.value;
+      this._setVariable(name,value,done);
+      break;
+    }
+    case "create:schema": {
+      params.name = statement.target.name;
+      this._database.createSchema(params,err => {
+        done(err,{ cmd: "CREATE SCHEMA" });
+      });
+      break;
+    }
+    case "drop:schema": {
+      params.name = statement.target.name;
+      this._database.dropSchema(params,err => {
+        done(err,{ cmd: "DROP SCHEMA" });
+      });
+      break;
+    }
+    case "create:table": {
+      params.name = statement.target.name;
+      this._database.createTable(params,err => {
+        done(err,{ cmd: "CREATE TABLE" });
+      });
+      break;
+    }
     default: {
       console.error("Unhandled statememt:",JSON.stringify(statement,null,"  "));
       const err = pg_errors.get('UNKNOWN_COMMAND',"Unknown command: " + statement_name);
@@ -171,11 +231,82 @@ Connection.prototype._executeStatement = function(statement,done) {
   }
 };
 
-Connection.prototype._addListeners = function() {
- this._pg_client.on('connect',params => {
-    //console.log("client_connect:",params);
-    this._pg_client.sendAuthenticationCleartextPassword();
+Connection.prototype._onConnect = function(params) {
+  const { database, user } = params;
+  this._user_name = user;
+
+  data_store.findDatabase(database,(err,db) => {
+    if (err) {
+      let e;
+      if (err == 'illegal_name') {
+        e = pg_errors.INVALID_DB_NAME_ERROR;
+      } else if (err == 'not_found') {
+        e = pg_errors.DB_DOES_NOT_EXIST_ERROR;
+      } else {
+        e = pg_errors.internal(err);
+      }
+      this._pg_client.sendErrorResponse(e);
+    } else {
+      this._database = db;
+      this._pg_client.sendAuthenticationCleartextPassword();
+    }
   });
+};
+
+Connection.prototype._showVariable = function(name,done) {
+  let err = null;
+  let value = "";
+  switch(name) {
+    case 'schema':
+    case 'search_path': {
+      value = this._transaction.getSearchPath().join(',');
+      break;
+    }
+    case 'current_commit':
+      value = this._commit.toHexString();
+      break;
+    default:
+      err = pg_errors.UNKNOWN_VARIABLE_ERROR;
+      break;
+  };
+  let result = {
+    cmd: 'SHOW',
+    format_list: [{ name, type: 'text' }],
+    row_list: [[value]],
+  };
+  done(err,result);
+};
+Connection.prototype._setVariable = function(name,value,done) {
+  switch(name) {
+    case 'schema':
+    case 'search_path': {
+      const path = value.split(',').map(s => s.trim());
+      this._transaction.setSearchPath(path);
+      this._search_path = path;
+      done(null,{ cmd: "SET" });
+      break;
+    }
+    case 'current_commit': {
+      this._database.getCommitByString(value,(err,commit) => {
+        if (err == 'not_found' || err == 'invalid_id') {
+          err = pg_errors.UNKNOWN_TRANSACTION_ID;
+        } else if (err) {
+          err = pg_errors.internal(err);
+        } else {
+          this._commit = commit;
+        }
+        done(err,{ cmd: "SET" });
+      });
+      break;
+    }
+    default:
+      done(pg_errors.UNKNOWN_VARIABLE_ERROR);
+      break;
+  };
+};
+
+Connection.prototype._addListeners = function() {
+ this._pg_client.on('connect',this._onConnect.bind(this));
   this._pg_client.on('password',password => {
     //console.log("client_password:",password);
     this._pg_client.sendAuthenticationOk();

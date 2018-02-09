@@ -5,6 +5,7 @@ const _ = require('lodash');
 const { SQLSTATE_ERROR_CODE_MAP } = require('node-postgres-server/constants.js');
 
 exports.get = get;
+exports.internal = internal;
 
 exports.ABORT_ERROR = {
   severity: 'ERROR',
@@ -37,6 +38,51 @@ exports.DUP_DB_NAME_ERROR = {
   code: SQLSTATE_ERROR_CODE_MAP.duplicate_database,
   message: "Database name already exists",
 };
+exports.DUP_SCHEMA_NAME_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.duplicate_schema,
+  message: "Schema name already exists",
+};
+exports.DB_DOES_NOT_EXIST_ERROR = {
+  severity: 'FATAL',
+  code: SQLSTATE_ERROR_CODE_MAP.invalid_catalog_name,
+  message: "Database does not exist",
+};
+exports.SCHEMA_DOES_NOT_EXIST_ERROR = {
+  severity: 'FATAL',
+  code: SQLSTATE_ERROR_CODE_MAP.invalid_schema_name,
+  message: "Schema does not exist",
+};
+exports.INTERNAL_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.internal_error,
+  message: "Internal error",
+};
+exports.NOT_IMPLEMENTED_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.internal_error,
+  message: "Not implemented",
+};
+exports.UNKNOWN_VARIABLE_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.invalid_name,
+  message: "Unrecognized configuration parameter",
+};
+exports.UNKNOWN_TRANSACTION_ID = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.internal_error,
+  message: "Unknown transaction ID",
+};
+
+function internal(err) {
+  const new_error = _.extend({},exports.INTERNAL_ERROR);
+
+  new_error.message = err;
+  if (err.stack) {
+    new_error.message = err.stack;
+  }
+  return new_error;
+}
 
 function get(error_name,extra) {
   const new_error = _.extend({},exports[error_name] || exports.SYNTAX_ERROR);

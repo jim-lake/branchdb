@@ -1,7 +1,8 @@
 {
-    "db": {
-        "host": "",
-        "user": "test",
-        "password": "password"
-    }
+  "db": {
+    "host": "",
+    "user": "test",
+    "password": "password",
+    "database": "branchdb"
+  }
 }

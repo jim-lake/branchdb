@@ -4,6 +4,7 @@ const grammar = require('../lib/grammar.js');
 const tracer = require('../lib/tracer.js');
 
 exports.parse = parse;
+exports.SyntaxError = grammar.SyntaxError;
 
 function parse(query) {
   const t = new tracer.Tracer();
