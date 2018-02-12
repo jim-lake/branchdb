@@ -54,7 +54,7 @@ Commit.prototype.toHexString = function() {
   return ret;
 };
 Commit.prototype.getHashString = function() {
-  return this._commit_hash.toString('hex');
+  return this._commit_hash;
 };
 
 Commit.prototype.nextHash = function(next_log) {

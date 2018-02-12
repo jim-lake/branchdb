@@ -42,6 +42,17 @@ Connection.prototype.setCommit = function(commit) {
   this._commit = commit;
 };
 
+Connection.prototype._sendErrorResponse = function(err) {
+  if (!err) {
+    console.error("Connection._sendErrorResponse: bad error:",err);
+    this._pg_client.sendErrorResponse(pg_errors.INTERNAL_ERROR);
+  } else if (err.severity && err.code && err.message) {
+    this._pg_client.sendErrorResponse(err);
+  } else {
+    this._pg_client.sendErrorResponse(pg_errors.internal(err));
+  }
+};
+
 Connection.prototype._onQuery = function(query) {
   try {
     const ast = parser.parse(query);
@@ -49,8 +60,7 @@ Connection.prototype._onQuery = function(query) {
     async.eachSeries(ast.statement,(s,done) => {
       this._transactStatement(s,(err,result) => {
         if (err) {
-          console.error("Connection._onQuery: transact error:",err);
-          this._pg_client.sendErrorResponse(err);
+          this._sendErrorResponse(err);
         } else {
           const { format_list, row_list, } = result;
           const cmd = result.cmd || "SELECT";
@@ -83,7 +93,7 @@ Connection.prototype._onQuery = function(query) {
       console.error("Connection._onQuery: internal error:",e.stack);
       err = pg_errors.internal(e);
     }
-    this._pg_client.sendErrorResponse(err);
+    this._sendErrorResponse(err);
     this._pg_client.sendReadyForQuery();
   }
 };
@@ -149,9 +159,10 @@ Connection.prototype._executeStatement = function(statement,done) {
 
   const statement_name = get_statement_name(statement);
   const params = {
-    client: this,
+    connection: this,
     transaction: this._transaction,
     database: this._database,
+    user_name: this._user_name,
     statement,
   };
 
@@ -239,7 +250,7 @@ Connection.prototype._onConnect = function(params) {
 
   const match = database.match(DB_SPEC_REGEX);
   if (!match || match.length < 2) {
-    this._pg_client.sendErrorResponse(pg_errors.INVALID_DB_NAME_ERROR);
+    this._sendErrorResponse(pg_errors.INVALID_DB_NAME_ERROR);
   } else {
     const db_name = match[1];
     const rev = match[2] || 'master';
@@ -276,7 +287,7 @@ Connection.prototype._onConnect = function(params) {
         } else {
           e = pg_errors.internal(err);
         }
-        this._pg_client.sendErrorResponse(e);
+        this._sendErrorResponse(e);
       } else {
         this._database = db;
         this._commit = commit;
@@ -291,12 +302,14 @@ Connection.prototype._showVariable = function(name,done) {
   let value = "";
   switch(name) {
     case 'schema':
-    case 'search_path': {
+    case 'search_path':
       value = this._transaction.getSearchPath().join(',');
       break;
-    }
     case 'current_commit':
       value = this._commit.toHexString();
+      break;
+    case 'current_commit_hash':
+      value = this._commit.getHashString();
       break;
     default:
       err = pg_errors.UNKNOWN_VARIABLE_ERROR;

@@ -1,5 +1,6 @@
 'use strict';
 
+const _ = require('lodash');
 const async = require('async');
 const pg_errors = require('./pg_errors.js');
 const Commit = require('./commit.js');
@@ -11,6 +12,7 @@ function Database(opts) {
   if (this instanceof Database) {
     this._name = opts.name;
     this._is_internal = !!opts.is_internal;
+    this._schema_cache = {};
   } else {
     return new Database(opts);
   }
@@ -22,23 +24,29 @@ Database.prototype.isInternal = function() {
   return this._is_internal;
 };
 
+const SCHEMA_NAME_REGEX = /^[\w-]+$/;
+
 Database.prototype.createSchema = function(opts,done) {
   const { name, transaction, } = opts;
-  this.getSchema(transaction,(err,schema) => {
-    if (!err) {
-      if (schema.schema_map[name]) {
-        err = pg_errors.DUP_SCHEMA_NAME_ERROR;
-      } else {
-        const cmd = 'CREATE_SCHEMA';
-        const log = "CREATE SCHEMA $1i";
-        const args = [name];
-        const schema_update = { cmd, name };
-        const op = { cmd, log, args, schema_update };
-        transaction.addOperation(op);
+  if (!SCHEMA_NAME_REGEX.test(name)) {
+    done(pg_errors.SYNTAX_ERROR);
+  } else {
+    this.getSchema(transaction,(err,schema) => {
+      if (!err) {
+        if (schema.schema_map[name]) {
+          err = pg_errors.DUP_SCHEMA_NAME_ERROR;
+        } else {
+          const cmd = 'CREATE_SCHEMA';
+          const log = "CREATE SCHEMA $1i";
+          const args = [name];
+          const schema_update = { cmd, name };
+          const op = { cmd, log, args, schema_update };
+          transaction.addOperation(op);
+        }
       }
-    }
-    done(err);
-  });
+      done(err);
+    });
+  }
 };
 
 Database.prototype.dropSchema = function(opts,done) {
@@ -119,12 +127,40 @@ Database.prototype._getCommitByBranchCommit = function(s,done) {
 
 Database.prototype.getSchema = function(transaction,done) {
   const commit = transaction.getCommit();
-  const schema = {
-    schema_map: {},
-    table_map: {},
-  };
+  const commit_id = commit.toString();
 
-  done(null,schema);
+  let base_schema = false;
+  let schema = false;
+  async.series([
+  (done) => {
+    if (commit_id in this._schema_cache) {
+      base_schema = this._schema_cache[commit_id];
+      done(null);
+    } else {
+      const opts = {
+        database: this._name,
+        commit_id,
+      };
+
+      data_store.getSchema(opts,(err,schema) => {
+        if (!err) {
+          this._schema_cache[commit_id] = schema;
+          base_schema = schema;
+        }
+        done(err);
+      });
+    }
+  }],(err) => {
+    if (!err) {
+      schema = this._extendSchema(base_schema,transaction);
+    }
+    done(err,schema);
+  });
+};
+Database.prototype._extendSchema = function(base_schema,transaction) {
+  const ret = _.extend({},base_schema);
+
+  return ret;
 };
 
 Database.prototype.getNextCommit = function(opts,done) {
