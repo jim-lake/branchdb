@@ -2,7 +2,7 @@
 
 const async = require('async');
 const pg_errors = require('./pg_errors.js');
-const parent_db = require('../lib/db.js');
+const data_store = require('./data_store.js');
 
 module.exports = Transaction;
 
@@ -78,93 +78,18 @@ Transaction.prototype.commit = function(done) {
     this._is_complete = true;
     done(null,"COMMIT");
   } else {
-    let client = null;
-    let next_commit = null;
-    const sql_list = [];
-    const database = this._connection.getDatabase();
-    const db_name = database.getName();
-    const user_name = this._connection.getUserName();
-
-    const commit_log = this._operation_list.map(op => {
-      const { log, args } = op;
-      return parent_db.preparse(log,args);
-    }).join(";");
-    const commit_hash = this._commit.nextHash(commit_log);
-
-    async.series([
-    done => {
-      const sql = parent_db.preparse("BEGIN;SET LOCAL search_path = $1i;",[db_name]);
-      parent_db.queryWithClient(sql,(err,res,c) => {
-        if (err) {
-          console.error("Transaction.commit: begin err:",err);
-        }
-        client = c;
-        done(err);
-      });
-    },
-    done => {
-      const opts = {
-        client,
-        commit: this._commit,
-        branch_mode: this._branch_mode,
-        commit_hash,
-      };
-      database.getNextCommit(opts,(err,next) => {
-        next_commit = next;
-        done(err);
-      });
-    },
-    done => {
-      let err = null;
-      const next_commit_id = next_commit.toIntString();
-      this._operation_list.forEach(op => {
-        const { sql, log, args } = op;
-        args.push(next_commit_id);
-        const new_sql = parent_db.preparse(sql,args);
-        sql_list.push(new_sql);
-      });
-
-      if (err) {
-        done(err);
-      } else {
-        const value = {
-          commit_id: next_commit_id,
-          commit_hash,
-          user_name,
-          commit_log,
-        };
-        const sql = parent_db.preparse("INSERT INTO commit $1v",[value]);
-        client.query(sql,(err,res) => {
-          if (err) {
-            console.error("Transaction.commit: create commit err:",err);
-          }
-          done(err);
-        });
-      }
-    },
-    done => {
-      const sql = sql_list.join(';');
-      client.query(sql,(err) => {
-        if (err) {
-          console.error("Transaction.commit: execute sql:",sql,",err:",err);
-        }
-        done(err);
-      });
-    },
-    done => {
-      parent_db.commit(client,(err) => {
-        if (err) {
-          console.error("Transaction.commit: commit err:",err);
-        }
-        done(err);
-      });
-    }],
-    err => {
+    const opts = {
+      connection: this._connection,
+      database: this._connection.getDatabase(),
+      operation_list: this._operation_list,
+      base_commit: this._commit,
+      branch_mode: this._branch_mode,
+    };
+    data_store.createCommit(opts,(err,next_commit) => {
       this._is_complete = true;
       this._is_auto_commit = false;
       if (err) {
         this._is_aborted = true;
-        parent_db.rollback(client);
         err = pg_errors.internal(err);
       } else {
         this._connection.setCommit(next_commit);
