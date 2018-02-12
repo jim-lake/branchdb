@@ -32,7 +32,7 @@ function Commit(opts) {
     if (commit_hash) {
       this._commit_hash = commit_hash;
     } else if (this._commit_id === "0") {
-      this._commit_hash = new Buffer(64,0);
+      this._commit_hash = Array(64+1).join("0")
     }
   } else {
     return new Commit(opts);
@@ -61,7 +61,7 @@ Commit.prototype.nextHash = function(next_log) {
   const hash = crypto.createHash('sha512');
   hash.update(this._commit_hash);
   hash.update(next_log);
-  return hash.digest();
+  return hash.digest('hex').slice(64);
 };
 Commit.prototype.getNextCommit = function(commit_hash) {
   const branch_number = this._branch_number;

@@ -3,6 +3,7 @@
 const async = require('async');
 const pg_errors = require('./pg_errors.js');
 const Commit = require('./commit.js');
+const data_store = require('./data_store.js');
 
 module.exports = Database;
 
@@ -16,6 +17,9 @@ function Database(opts) {
 }
 Database.prototype.getName = function() {
   return this._name;
+};
+Database.prototype.isInternal = function() {
+  return this._is_internal;
 };
 
 Database.prototype.createSchema = function(opts,done) {
@@ -60,24 +64,56 @@ Database.prototype.createTable = function(opts,done) {
   done(pg_errors.NOT_IMPLEMENTED_ERROR);
 };
 
+const BRANCH_COMMIT_REGEX = /^(\d*)::(\d*)$/;
+const LABEL_NAME_REGEX = /^[A-Za-z0-9_-]*$/;
+const COMMIT_HASH_REGEX = /^[0-9A-Fa-f]*$/;
+
 Database.prototype.getCommitByString = function(s,done) {
   if (this._is_internal) {
-    done('not_found');
+    done('commit_not_found');
   } else {
-    const info = Commit.stringToCommitInfo(s)
-    if (!info) {
-      done('invalid_id');
-    } else if (info.commit_id == 0) {
-      done(null,new Commit(0));
-    } else {
-      const { commit_id } = info;
+    const is_branch_commit = s.match(BRANCH_COMMIT_REGEX) != null;
+    const maybe_label = s.match(LABEL_NAME_REGEX) != null;
+    const maybe_hash = s.match(COMMIT_HASH_REGEX) != null;
 
-      const opts = {
-        database: this._name,
-        commit_id,
-      };
-      data_store.findCommit(opts,done);
+    if (is_branch_commit) {
+      this._getCommitByBranchCommit(s,done);
+    } else if (maybe_label) {
+      this._getCommitByLabel(s,(err,commit) => {
+        if (err == 'label_not_found' && maybe_hash) {
+          this._getCommitByHash(s,done);
+        } else {
+          done(err,commit);
+        }
+      });
+    } else {
+      done('commit_not_found');
     }
+  }
+};
+
+Database.prototype._getCommitByLabel = function(label,done) {
+  const opts = { database: this._name, label };
+  data_store.findCommitByLabel(opts,done);
+};
+Database.prototype._getCommitByHash = function(hash,done) {
+  const opts = { database: this._name, hash };
+  data_store.findCommitByHash(opts,done);
+};
+Database.prototype._getCommitByBranchCommit = function(s,done) {
+  const info = Commit.stringToCommitInfo(s)
+  if (!info) {
+    done('invalid_id');
+  } else if (info.commit_id == 0) {
+    done(null,new Commit(0));
+  } else {
+    const { commit_id } = info;
+
+    const opts = {
+      database: this._name,
+      commit_id,
+    };
+    data_store.findCommit(opts,done);
   }
 };
 

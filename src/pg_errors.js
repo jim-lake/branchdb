@@ -68,7 +68,7 @@ exports.UNKNOWN_VARIABLE_ERROR = {
   code: SQLSTATE_ERROR_CODE_MAP.invalid_name,
   message: "Unrecognized configuration parameter",
 };
-exports.UNKNOWN_TRANSACTION_ID = {
+exports.UNKNOWN_COMMIT_ID = {
   severity: 'ERROR',
   code: SQLSTATE_ERROR_CODE_MAP.internal_error,
   message: "Unknown transaction ID",

@@ -5,12 +5,15 @@ const parent_db = require('../lib/db.js');
 const pg_errors = require('./pg_errors.js');
 const uuidv1 = require('uuid/v1');
 const Database = require('./database.js');
+const Commit = require('./commit.js');
 
 exports.createDatabase = createDatabase;
 exports.dropDatabase = dropDatabase;
 exports.findDatabase = findDatabase;
 exports.createCommit = createCommit;
 exports.findCommit = findCommit;
+exports.findCommitByLabel = findCommitByLabel;
+exports.findCommitByHash = findCommitByHash;
 exports.createCommit = createCommit;
 
 const DB_NAME_REGEX = /^[\w-]*$/;
@@ -51,7 +54,7 @@ SET search_path = $1l;
 CREATE TABLE commit
   (
     commit_id BIGINT PRIMARY KEY NOT NULL,
-    commit_hash BYTEA NOT NULL,
+    commit_hash CHAR(64) NOT NULL,
     user_name VARCHAR(256) NOT NULL,
     commit_log TEXT NOT NULL
   );
@@ -151,6 +154,7 @@ function findDatabase(name,done) {
 }
 
 function findCommit(opts,done) {
+  console.log("findCommit");
   const { database, commit_id } = opts;
 
   const sql = "SELECT * FROM $1i.commit WHERE commit_id = $2l";
@@ -159,7 +163,61 @@ function findCommit(opts,done) {
     if (err) {
       console.error("data_store.findCommit: sql err:",err);
     } else if (res.rows.length == 0) {
-      err = 'not_found';
+      err = 'commit_not_found';
+    } else {
+      const row0 = res.rows[0];
+      commit = new Commit(row0);
+    }
+    done(err,commit);
+  });
+}
+
+function findCommitByLabel(opts,done) {
+  const { database, label } = opts;
+
+  const sql =
+`
+SELECT c.*
+FROM $1i.label l
+JOIN $1i.commit c ON
+ ( l.is_tag = TRUE
+   AND c.commit_id = l.commit_id
+ )
+ OR
+ ( c.commit_id >= l.commit_id
+   AND c.commit_id < (l.commit_id::bit(64) | B'0000000000000000000000000000000011111111111111111111111111111111')::bigint
+ )
+WHERE
+ l.label ILIKE $2l
+ORDER BY c.commit_id DESC
+LIMIT 1;
+;
+`
+  parent_db.queryPreparse(sql,[database,label],(err,res) => {
+    let commit;
+    if (err) {
+      console.error("data_store.findCommit: sql err:",err);
+    } else if (res.rows.length == 0) {
+      err = 'label_not_found';
+    } else {
+      const row0 = res.rows[0];
+      commit = new Commit(row0);
+    }
+    done(err,commit);
+  });
+
+}
+
+function findCommitByHash(opts,done) {
+  const { database, hash } = opts;
+  const like_hash = hash.toLowerCase() + "%";
+  const sql = "SELECT * FROM $1i.commit WHERE commit_hash LIKE $2l";
+  parent_db.queryPreparse(sql,[database,like_hash],(err,res) => {
+    let commit;
+    if (err) {
+      console.error("data_store.findCommitByHash: sql err:",err);
+    } else if (res.rows.length == 0) {
+      err = 'hash_not_found';
     } else {
       const row0 = res.rows[0];
       commit = new Commit(row0);
@@ -224,6 +282,7 @@ function createCommit(opts,done) {
       commit_log,
     };
     const sql = parent_db.preparse("INSERT INTO commit $1v",[value]);
+    console.log(sql);
     client.query(sql,(err,res) => {
       if (err) {
         console.error("createCommit: create commit err:",err);

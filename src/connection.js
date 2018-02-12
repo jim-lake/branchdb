@@ -49,7 +49,7 @@ Connection.prototype._onQuery = function(query) {
     async.eachSeries(ast.statement,(s,done) => {
       this._transactStatement(s,(err,result) => {
         if (err) {
-          console.log("Connection._onQuery: transact error:",err);
+          console.error("Connection._onQuery: transact error:",err);
           this._pg_client.sendErrorResponse(err);
         } else {
           const { format_list, row_list, } = result;
@@ -231,26 +231,59 @@ Connection.prototype._executeStatement = function(statement,done) {
   }
 };
 
+const DB_SPEC_REGEX = /^([^:]*):?(.*)?$/;
+
 Connection.prototype._onConnect = function(params) {
   const { database, user } = params;
   this._user_name = user;
 
-  data_store.findDatabase(database,(err,db) => {
-    if (err) {
-      let e;
-      if (err == 'illegal_name') {
-        e = pg_errors.INVALID_DB_NAME_ERROR;
-      } else if (err == 'not_found') {
-        e = pg_errors.DB_DOES_NOT_EXIST_ERROR;
+  const match = database.match(DB_SPEC_REGEX);
+  if (!match || match.length < 2) {
+    this._pg_client.sendErrorResponse(pg_errors.INVALID_DB_NAME_ERROR);
+  } else {
+    const db_name = match[1];
+    const rev = match[2] || 'master';
+
+    let db = false;
+    let commit = false;
+    async.series([
+    (done) => {
+      data_store.findDatabase(db_name,(err,found_db) => {
+        db = found_db;
+        done(err);
+      });
+    },
+    (done) => {
+      if (db.isInternal()) {
+        commit = new Commit(0);
+        done();
       } else {
-        e = pg_errors.internal(err);
+        db.getCommitByString(rev,(err,found_commit) => {
+          commit = found_commit;
+          done(err);
+        });
       }
-      this._pg_client.sendErrorResponse(e);
-    } else {
-      this._database = db;
-      this._pg_client.sendAuthenticationCleartextPassword();
-    }
-  });
+    }],
+    (err) => {
+      if (err) {
+        let e;
+        if (err == 'illegal_name') {
+          e = pg_errors.INVALID_DB_NAME_ERROR;
+        } else if (err == 'db_not_found') {
+          e = pg_errors.DB_DOES_NOT_EXIST_ERROR;
+        } else if (err == 'commit_not_found' || err == 'label_not_found' || err == 'hash_not_found') {
+          e = pg_errors.UNKNOWN_COMMIT_ID;
+        } else {
+          e = pg_errors.internal(err);
+        }
+        this._pg_client.sendErrorResponse(e);
+      } else {
+        this._database = db;
+        this._commit = commit;
+        this._pg_client.sendAuthenticationCleartextPassword();
+      }
+    });
+  }
 };
 
 Connection.prototype._showVariable = function(name,done) {
@@ -289,7 +322,7 @@ Connection.prototype._setVariable = function(name,value,done) {
     case 'current_commit': {
       this._database.getCommitByString(value,(err,commit) => {
         if (err == 'not_found' || err == 'invalid_id') {
-          err = pg_errors.UNKNOWN_TRANSACTION_ID;
+          err = pg_errors.UNKNOWN_COMMIT_ID;
         } else if (err) {
           err = pg_errors.internal(err);
         } else {
