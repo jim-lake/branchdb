@@ -13,11 +13,17 @@ function Transaction(connection) {
     this._is_complete = false;
     this._is_aborted = false;
     this._is_implicit_abort = false;
-    this._branch_mode = "branch";
+    this._operation_list = [];
+
+    this._branch_mode = connection.getBranchMode();
+    this._tracking_mode = connection.getTrackingMode();
     this._is_auto_commit = connection.isAutoCommit();
     this._search_path = connection.getSearchPath();
     this._commit = connection.getCommit();
-    this._operation_list = [];
+
+    if (this._tracking_mode == 'branch') {
+      this._commit = connection.getDatabase().getBranchHead(this._commit);
+    }
   } else {
     return new Transaction(connection);
   }
@@ -43,6 +49,9 @@ Transaction.prototype.setSearchPath = function(path) {
 };
 Transaction.prototype.getCommit = function() {
   return this._commit;
+};
+Transaction.prototype.getOperationList = function() {
+  return this._operation_list;
 };
 
 Transaction.prototype.abort = function() {
@@ -90,7 +99,11 @@ Transaction.prototype.commit = function(done) {
       this._is_auto_commit = false;
       if (err) {
         this._is_aborted = true;
-        err = pg_errors.internal(err);
+        if (err == 'conflict') {
+          err = pg_errors.COMMIT_CONFLICT_ERROR;
+        } else {
+          err = pg_errors.internal(err);
+        }
       } else {
         this._connection.setCommit(next_commit);
       }

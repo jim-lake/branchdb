@@ -68,10 +68,15 @@ exports.UNKNOWN_VARIABLE_ERROR = {
   code: SQLSTATE_ERROR_CODE_MAP.invalid_name,
   message: "Unrecognized configuration parameter",
 };
-exports.UNKNOWN_COMMIT_ID = {
+exports.UNKNOWN_COMMIT_ID_ERROR = {
   severity: 'ERROR',
   code: SQLSTATE_ERROR_CODE_MAP.internal_error,
   message: "Unknown transaction ID",
+};
+exports.COMMIT_CONFLICT_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.exclusion_violation,
+  message: "Transaction conflict",
 };
 
 function internal(err) {

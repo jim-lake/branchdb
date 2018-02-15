@@ -5,26 +5,50 @@ const async = require('async');
 const pg_errors = require('./pg_errors.js');
 const Commit = require('./commit.js');
 const data_store = require('./data_store.js');
+const {
+  BRANCH_COMMIT_REGEX,
+  LABEL_NAME_REGEX,
+  COMMIT_HASH_REGEX,
+  SCHEMA_NAME_REGEX,
+} = require('./constants.js');
 
 module.exports = Database;
+
+const g_database_map = {};
+
+new Database({ name: 'branchdb', is_internal: true });
+new Database({ name: 'postgres', is_internal: true });
+
+function findDatabase(name,done) {
+  let ret = false;
+  if (name in g_database_map) {
+    const db = g_database_map[name];
+    done(null,db);
+  } else {
+    data_store.findDatabase(name,done);
+  }
+  return ret;
+}
 
 function Database(opts) {
   if (this instanceof Database) {
     this._name = opts.name;
     this._is_internal = !!opts.is_internal;
     this._schema_cache = {};
+    this._branch_map = {};
+    g_database_map[opts.name] = this;
   } else {
     return new Database(opts);
   }
 }
+Database.findDatabase = findDatabase;
+
 Database.prototype.getName = function() {
   return this._name;
 };
 Database.prototype.isInternal = function() {
   return this._is_internal;
 };
-
-const SCHEMA_NAME_REGEX = /^[\w-]+$/;
 
 Database.prototype.createSchema = function(opts,done) {
   const { name, transaction, } = opts;
@@ -72,31 +96,67 @@ Database.prototype.createTable = function(opts,done) {
   done(pg_errors.NOT_IMPLEMENTED_ERROR);
 };
 
-const BRANCH_COMMIT_REGEX = /^(\d*)::(\d*)$/;
-const LABEL_NAME_REGEX = /^[A-Za-z0-9_-]*$/;
-const COMMIT_HASH_REGEX = /^[0-9A-Fa-f]*$/;
-
 Database.prototype.getCommitByString = function(s,done) {
   if (this._is_internal) {
     done('commit_not_found');
   } else {
-    const is_branch_commit = s.match(BRANCH_COMMIT_REGEX) != null;
-    const maybe_label = s.match(LABEL_NAME_REGEX) != null;
-    const maybe_hash = s.match(COMMIT_HASH_REGEX) != null;
+    const is_branch_commit = BRANCH_COMMIT_REGEX.test(s);
+    const maybe_label = LABEL_NAME_REGEX.test(s);
+    const maybe_hash = COMMIT_HASH_REGEX.test(s);
 
-    if (is_branch_commit) {
-      this._getCommitByBranchCommit(s,done);
-    } else if (maybe_label) {
-      this._getCommitByLabel(s,(err,commit) => {
-        if (err == 'label_not_found' && maybe_hash) {
-          this._getCommitByHash(s,done);
-        } else {
-          done(err,commit);
-        }
-      });
-    } else {
-      done('commit_not_found');
-    }
+    let commit;
+    let rev_type;
+    async.series([
+    (done) => {
+      if (is_branch_commit) {
+        this._getCommitByBranchCommit(s,(err,c) => {
+          commit = c;
+          rev_type = 'commit_id';
+          // this excludes the next 2 cases because they are definitionally false
+          done(err);
+        });
+      } else {
+        done();
+      }
+    },
+    (done) => {
+      if (!commit && maybe_label) {
+        this._getCommitByLabel(s,(err,c,is_tag) => {
+          if (err == 'label_not_found') {
+            err = null;
+          } else  {
+            commit = c;
+            rev_type = is_tag ? 'tag' : 'branch';
+          }
+          done(err);
+        });
+      } else {
+        done();
+      }
+    },
+    (done) => {
+      if (!commit && maybe_hash) {
+        this._getCommitByHash(s,(err,c) => {
+          commit = c;
+          rev_type = 'hash';
+          done(err,commit,'hash');
+        });
+      } else {
+        done();
+      }
+    }],
+    (err) => {
+      if (!err && !commit) {
+        err = 'commit_not_found';
+      }
+      if (err) {
+        done(err);
+      } else {
+        this._loadBranchInfo(commit,(err) => {
+          done(err,commit,rev_type);
+        });
+      }
+    });
   }
 };
 
@@ -137,11 +197,12 @@ Database.prototype.getSchema = function(transaction,done) {
       base_schema = this._schema_cache[commit_id];
       done(null);
     } else {
+      const { branch_path } = this._getBranch(commit);
       const opts = {
         database: this._name,
-        commit_id,
+        commit,
+        branch_path,
       };
-
       data_store.getSchema(opts,(err,schema) => {
         if (!err) {
           this._schema_cache[commit_id] = schema;
@@ -158,13 +219,116 @@ Database.prototype.getSchema = function(transaction,done) {
   });
 };
 Database.prototype._extendSchema = function(base_schema,transaction) {
-  const ret = _.extend({},base_schema);
+  const ret = _.merge({},base_schema);
+
+  const op_list = transaction.getOperationList();
+
+  op_list.forEach(op => {
+    if (op.schema_update) {
+      const { cmd, name } = op.schema_update;
+      switch(cmd) {
+        case 'CREATE_SCHEMA':
+          ret.schema_map[name] = {
+            schema_name: name,
+          };
+          break;
+        case 'DROP_SCHEMA':
+          delete ret.schema_map[name];
+          _.each(ret.table_map,(t,schema_table) => {
+            if (t.schema_name == name) {
+              delete ret.table_map[schema_table];
+            }
+          });
+          break;
+        default:
+          console.error("Database._extendSchema: unhandled schema_update:",op);
+          break;
+      }
+    }
+  });
 
   return ret;
 };
 
-Database.prototype.getNextCommit = function(opts,done) {
-  const { client, commit, commit_hash } = opts;
+Database.prototype.reserveCommit = function(opts,done) {
+  const { client, commit, commit_hash, branch_mode } = opts;
 
-  done(null,commit.getNextCommit(commit_hash));
+  const branch = this._getBranch(commit);
+
+  if (!branch.is_head_reservered && commit.isEqual(branch.head_commit)) {
+    branch.is_head_reservered = true;
+    done(null,commit.getNextCommit(commit_hash));
+  } else if (branch_mode == 'conflict') {
+    done('conflict');
+  } else if (branch_mode == 'branch') {
+    this._createBranch(opts,done);
+  } else {
+    done('bad_branch_mode');
+  }
+};
+Database.prototype.cancelCommit = function(next_commit) {
+  if (next_commit.getCommitNumber() == 0) {
+    const branch_number = next_commit.getBranchNumber();
+    delete this._branch_map[branch_number];
+  }
+};
+Database.prototype.finishCommit = function(next_commit) {
+  const branch = this._getBranch(next_commit);
+  branch.head_commit = next_commit;
+  branch.is_head_reservered = false;
+};
+
+Database.prototype.getBranchHead = function(commit) {
+   const branch = this._getBranch(commit);
+   const ret = branch.head_commit;
+   return ret;
+};
+
+Database.prototype._getBranch = function(arg) {
+  let branch_number;
+  if (arg instanceof Commit) {
+    branch_number = arg.getBranchNumber();
+  } else if (typeof arg == 'number') {
+    branch_number = arg;
+  } else {
+    throw new Error("Bad branch index");
+  }
+  if (!(branch_number in this._branch_map)) {
+    this._branch_map[branch_number] = {
+      branch_number,
+    };
+  }
+
+  return this._branch_map[branch_number];
+};
+Database.prototype._loadBranchInfo = function(commit,done) {
+  const branch = this._getBranch(commit);
+
+  const opts = {
+    database: this._name,
+    commit,
+  };
+  data_store.getBranchInfo(opts,(err,branch_info) => {
+    if (!err) {
+      branch.head_commit = branch_info.head_commit;
+      branch.branch_path = branch_info.branch_path;
+    }
+    done(err);
+  });
+};
+Database.prototype._createBranch = function(params,done) {
+  const { client, commit, commit_hash, } = params;
+
+  const opts = {
+    client,
+    database: this._name,
+    parent_commit: commit,
+  };
+  data_store.createBranch(opts,(err,branch_number) => {
+    let next_commit;
+    if (!err) {
+      next_commit = commit.getNextBranchCommit(branch_number,commit_hash);
+    }
+    done(err,next_commit);
+  });
 };

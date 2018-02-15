@@ -2,6 +2,9 @@
 
 const crypto = require('crypto');
 const bigint = require('big-integer');
+const {
+  BRANCH_COMMIT_REGEX,
+} = require('./constants.js');
 
 module.exports = Commit;
 
@@ -23,7 +26,8 @@ function Commit(opts) {
       s = opts.toString();
       const info = stringToCommitInfo(s);
       if (!info) {
-        throw new Error("Commit.Commit: bad new commit:" + opts);
+        console.error("Commit.Commit: bad new commit:",opts);
+        throw new Error('bad_commit');
       }
       this._commit_id = info.commit_id;
       this._branch_number = info.branch_number;
@@ -42,7 +46,6 @@ function Commit(opts) {
 Commit.prototype.toString = function() {
   return this._commit_id;
 };
-
 Commit.prototype.toIntString = function() {
   return this._commit_id;
 };
@@ -56,6 +59,15 @@ Commit.prototype.toHexString = function() {
 Commit.prototype.getHashString = function() {
   return this._commit_hash;
 };
+Commit.prototype.getBranchNumber = function() {
+  return this._branch_number;
+};
+Commit.prototype.getCommitNumber = function() {
+  return this._commit_number;
+};
+Commit.prototype.isEqual = function(b) {
+  return this._commit_id === b._commit_id;
+};
 
 Commit.prototype.nextHash = function(next_log) {
   const hash = crypto.createHash('sha512');
@@ -68,6 +80,15 @@ Commit.prototype.getNextCommit = function(commit_hash) {
   const commit_number = this._commit_number + 1;
   return new Commit({ branch_number, commit_number, commit_hash });
 };
+Commit.prototype.getNextBranchCommit = function(branch_number,commit_hash) {
+  return new Commit({ branch_number, commit_number: 0, commit_hash });
+};
+Commit.prototype.getBranchMin = function() {
+  return bigint(this._branch_number).shiftLeft(32).toString();
+};
+Commit.prototype.getBranchMax = function() {
+  return bigint(this._branch_number).shiftLeft(32).add(0xffffffff).toString();
+};
 
 Commit.stringToCommitInfo = stringToCommitInfo;
 
@@ -77,7 +98,7 @@ function stringToCommitInfo(s) {
   let branch_number;
   try {
     if (typeof s == 'string' && s.indexOf("::") != -1) {
-      const match = s.match(/^([0-9a-fA-F]{1,8})::([0-9a-fA-F]{1,8})$/);
+      const match = s.match(BRANCH_COMMIT_REGEX);
       if (match) {
         branch_number = parseInt(match[1],16);
         commit_number = parseInt(match[2],16);

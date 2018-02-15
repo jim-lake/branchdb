@@ -8,6 +8,10 @@ const uuidv1 = require('uuid/v1');
 const Database = require('./database.js');
 const Commit = require('./commit.js');
 
+const {
+  DB_NAME_REGEX,
+} = require('./constants.js');
+
 exports.createDatabase = createDatabase;
 exports.dropDatabase = dropDatabase;
 exports.findDatabase = findDatabase;
@@ -17,8 +21,8 @@ exports.findCommitByLabel = findCommitByLabel;
 exports.findCommitByHash = findCommitByHash;
 exports.createCommit = createCommit;
 exports.getSchema = getSchema;
-
-const DB_NAME_REGEX = /^[\w-]+$/;
+exports.getBranchInfo = getBranchInfo;
+exports.createBranch = createBranch;
 
 function _is_internal_database_name(name) {
   let ret = false;
@@ -63,7 +67,7 @@ CREATE TABLE _commit
 CREATE INDEX commit_commit_hash_index ON _commit(commit_hash);
 CREATE TABLE _branch
   (
-    branch_number BIGINT PRIMARY KEY NOT NULL,
+    branch_number SERIAL PRIMARY KEY NOT NULL,
     parent_commit_id BIGINT NOT NULL
   );
 CREATE TABLE _label
@@ -134,10 +138,7 @@ function dropDatabase(opts,done) {
 }
 
 function findDatabase(name,done) {
-  if (_is_internal_database_name(name)) {
-    const database = new Database({ name, is_internal: true });
-    setImmediate(() => done(null,database));
-  } else if (!_is_valid_db_name(name)) {
+  if (!_is_valid_db_name(name)) {
     setImmediate(() => done('invalid_name'));
   } else {
     const sql = "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1";
@@ -146,7 +147,7 @@ function findDatabase(name,done) {
       if (err) {
         console.error("data_store.findDatabase: sql err:",err);
       } else if (res.rows.length == 0) {
-        err = 'not_found';
+        err = 'db_not_found';
       } else {
         database = new Database({ name });
       }
@@ -180,7 +181,7 @@ function findCommitByLabel(opts,done) {
 
   const sql =
 `
-SELECT c.*
+SELECT c.*,l.is_tag
 FROM $1i._label l
 JOIN $1i._commit c ON
  ( l.is_tag = TRUE
@@ -200,15 +201,17 @@ LIMIT 1;
 `
   parent_db.queryPreparse(sql,[database,match_label],(err,res) => {
     let commit;
+    let is_tag;
     if (err) {
       console.error("data_store.findCommit: sql err:",err);
     } else if (res.rows.length == 0) {
       err = 'label_not_found';
     } else {
       const row0 = res.rows[0];
+      is_tag = row0.is_tag;
       commit = new Commit(row0);
     }
-    done(err,commit);
+    done(err,commit,is_tag);
   });
 
 }
@@ -232,7 +235,6 @@ function findCommitByHash(opts,done) {
 }
 
 function createCommit(opts,done) {
-  console.log("createCommit");
   const {
     base_commit,
     connection,
@@ -273,7 +275,7 @@ function createCommit(opts,done) {
       branch_mode,
       commit_hash,
     };
-    database.getNextCommit(opts,(err,next) => {
+    database.reserveCommit(opts,(err,next) => {
       next_commit = next;
       done(err);
     });
@@ -322,6 +324,11 @@ function createCommit(opts,done) {
   (err) => {
     if (err) {
       parent_db.rollback(client);
+      if (next_commit) {
+        database.cancelCommit(next_commit);
+      }
+    } else {
+      database.finishCommit(next_commit);
     }
     done(err,next_commit);
   });
@@ -353,30 +360,30 @@ function _map_db_op(op) {
 }
 
 function getSchema(opts,done) {
-  const { database, commit_id } = opts;
+  const { database, commit, branch_path } = opts;
+
+  const commit_predicate = _get_commit_predicate(commit,branch_path);
 
   const sql =
 `
 BEGIN READ ONLY;
 SET search_path = $1l;
 SELECT *
-FROM _schema
-WHERE commit_id <= $2l
-ORDER BY commit_id ASC
-;
+  FROM _schema
+  WHERE ${commit_predicate}
+  ORDER BY commit_id ASC;
 SELECT *
-FROM _table
-WHERE commit_id <= $2l
-ORDER BY commit_id ASC
-;
+  FROM _table
+  WHERE ${commit_predicate}
+  ORDER BY commit_id ASC;
 ROLLBACK;
 `
-  parent_db.queryPreparse(sql,[database,commit_id],(err,res) => {
+  parent_db.queryPreparse(sql,[database],(err,res) => {
     let schema = false;
     if (err) {
       console.error("data_store.getSchema: sql err:",err);
     } else if (res.length < 4) {
-      err = 'bad_schema';
+      err = 'invalid_parent_result';
     } else {
       const schema_rows = res[2].rows;
       const table_rows = res[3].rows;
@@ -420,4 +427,127 @@ ROLLBACK;
     }
     done(err,schema);
   });
+}
+
+function getBranchInfo(opts,done) {
+  const { database, commit } = opts;
+  const commit_id = commit.toIntString();
+  const branch_number = commit.getBranchNumber();
+  const branch_min = commit.getBranchMin();
+  const branch_max = commit.getBranchMax();
+
+  const sql =
+`
+BEGIN READ ONLY;
+SET search_path = $1l;
+SELECT
+  *
+  FROM _commit
+  WHERE commit_id BETWEEN $2l AND $3l
+  ORDER BY commit_id DESC
+  LIMIT 1;
+WITH RECURSIVE recursive_branches(branch_number,parent_commit_id,parent_branch_number) AS (
+  SELECT
+    branch_number,
+    parent_commit_id,
+    parent_commit_id >> 32 AS parent_branch_number
+  FROM _branch
+  WHERE branch_number = $4l
+  UNION ALL
+  SELECT
+    b1.branch_number,
+    b1.parent_commit_id,
+    b1.parent_commit_id >> 32 AS parent_branch_number
+  FROM _branch b1
+  JOIN recursive_branches b2 ON b1.branch_number = b2.parent_branch_number
+  )
+  SELECT *
+  FROM recursive_branches
+  ORDER BY branch_number DESC;
+ROLLBACK;
+`
+  const args = [database,branch_min,branch_max,branch_number];
+  parent_db.queryPreparse(sql,args,(err,res) => {
+    let branch_info;
+    if (err) {
+      console.error("data_store.getBranchInfo: sql err:",err);
+    } else if (res.length < 4) {
+      err = 'invalid_parent_result';
+    } else {
+      try {
+        const head_row0 = res[2].rows[0];
+        const head_commit = new Commit(head_row0);
+        const branch_rows = res[3].rows;
+
+        const branch_path = [];
+        branch_rows.forEach(r => {
+          const { branch_number, parent_commit_id, parent_branch_number } = r;
+          const parent_commit = new Commit(parent_commit_id);
+
+          branch_path.push({
+            parent_commit,
+            branch_min: parent_commit.getBranchMin(),
+            branch_max: parent_commit_id,
+          });
+        });
+
+        branch_info = {
+          head_commit,
+          branch_path,
+        };
+      } catch(e) {
+        console.error("data_store.getBranchInfo: exception:",e.stack);
+        err = 'invalid_branch';
+      }
+    }
+    done(err,branch_info);
+  });
+}
+
+function createBranch(opts,done) {
+  const { client, database, parent_commit } = opts;
+
+  const parent_commit_id = parent_commit.toIntString();
+
+  const value = {
+    parent_commit_id,
+  };
+  const sql = "INSERT INTO $1i._branch $2v RETURNING branch_number";
+  const new_sql = parent_db.preparse(sql,[database,value]);
+  client.query(new_sql,(err,res) => {
+    let branch_number;
+    if (err) {
+      console.error("data_store.createBranch: sql err:",err);
+    } else if (res.rows.length == 0) {
+      err = 'bad_branch_create';
+    } else {
+      branch_number = res.rows[0].branch_number;
+    }
+    done(err,branch_number);
+  });
+}
+
+function _get_commit_predicate(commit,branch_path) {
+  const commit_id = commit.toIntString();
+  const branch_min = commit.getBranchMin();
+
+  let branch_sql = "";
+  if (branch_path.length > 0) {
+    branch_sql = " OR " + branch_path.map(b => {
+      const { branch_min, branch_max } = b;
+      const sql = "(commit_id >= $1l AND commit_id <= $2l)";
+      return parent_db.preparse(sql,[branch_min,branch_max]);
+    }).join(" OR ");
+  }
+
+  const sql =
+`
+commit_id <= $1l
+AND (
+ commit_id >= $2l
+ ${branch_sql}
+ )
+`
+  const ret = parent_db.preparse(sql,[commit_id,branch_min]);
+  return ret;
 }

@@ -5,7 +5,12 @@ const parser = require('./parser.js');
 const Transaction = require('./transaction.js');
 const Commit = require('./commit.js');
 const data_store = require('./data_store.js');
+const Database = require('./database.js');
 const pg_errors = require('./pg_errors.js');
+
+const {
+  DB_CONNECT_SPEC_REGEX,
+} = require('./constants.js');
 
 module.exports = Connection;
 
@@ -18,6 +23,8 @@ function Connection(pg_client) {
     this._search_path = ['public'];
     this._commit = new Commit(0);
     this._user_name = "";
+    this._branch_mode = "branch";
+    this._tracking_mode = "none";
     this._addListeners();
   } else {
     return new Connection(pg_client);
@@ -40,6 +47,12 @@ Connection.prototype.getUserName = function() {
 };
 Connection.prototype.setCommit = function(commit) {
   this._commit = commit;
+};
+Connection.prototype.getBranchMode = function() {
+  return this._branch_mode;
+};
+Connection.prototype.getTrackingMode = function() {
+  return this._tracking_mode;
 };
 
 Connection.prototype._sendErrorResponse = function(err) {
@@ -242,13 +255,11 @@ Connection.prototype._executeStatement = function(statement,done) {
   }
 };
 
-const DB_SPEC_REGEX = /^([^:]*):?(.*)?$/;
-
 Connection.prototype._onConnect = function(params) {
   const { database, user } = params;
   this._user_name = user;
 
-  const match = database.match(DB_SPEC_REGEX);
+  const match = database.match(DB_CONNECT_SPEC_REGEX);
   if (!match || match.length < 2) {
     this._sendErrorResponse(pg_errors.INVALID_DB_NAME_ERROR);
   } else {
@@ -259,7 +270,7 @@ Connection.prototype._onConnect = function(params) {
     let commit = false;
     async.series([
     (done) => {
-      data_store.findDatabase(db_name,(err,found_db) => {
+      Database.findDatabase(db_name,(err,found_db) => {
         db = found_db;
         done(err);
       });
@@ -267,10 +278,16 @@ Connection.prototype._onConnect = function(params) {
     (done) => {
       if (db.isInternal()) {
         commit = new Commit(0);
+        this._tracking_mode = 'none';
         done();
       } else {
-        db.getCommitByString(rev,(err,found_commit) => {
+        db.getCommitByString(rev,(err,found_commit,rev_type) => {
           commit = found_commit;
+          if (rev_type == 'branch') {
+            this._tracking_mode = 'branch';
+          } else {
+            this._tracking_mode = 'none';
+          }
           done(err);
         });
       }
@@ -283,7 +300,7 @@ Connection.prototype._onConnect = function(params) {
         } else if (err == 'db_not_found') {
           e = pg_errors.DB_DOES_NOT_EXIST_ERROR;
         } else if (err == 'commit_not_found' || err == 'label_not_found' || err == 'hash_not_found') {
-          e = pg_errors.UNKNOWN_COMMIT_ID;
+          e = pg_errors.UNKNOWN_COMMIT_ID_ERROR;
         } else {
           e = pg_errors.internal(err);
         }
@@ -306,10 +323,16 @@ Connection.prototype._showVariable = function(name,done) {
       value = this._transaction.getSearchPath().join(',');
       break;
     case 'current_commit':
-      value = this._commit.toHexString();
+      value = this._transaction.getCommit().toHexString();
       break;
     case 'current_commit_hash':
-      value = this._commit.getHashString();
+      value = this._transaction.getCommit().getHashString();
+      break;
+    case 'branch_mode':
+      value = this._branch_mode;
+      break;
+    case 'tracking_mode':
+      value = this._tracking_mode;
       break;
     default:
       err = pg_errors.UNKNOWN_VARIABLE_ERROR;
@@ -335,7 +358,7 @@ Connection.prototype._setVariable = function(name,value,done) {
     case 'current_commit': {
       this._database.getCommitByString(value,(err,commit) => {
         if (err == 'not_found' || err == 'invalid_id') {
-          err = pg_errors.UNKNOWN_COMMIT_ID;
+          err = pg_errors.UNKNOWN_COMMIT_ID_ERROR;
         } else if (err) {
           err = pg_errors.internal(err);
         } else {
