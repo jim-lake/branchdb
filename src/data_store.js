@@ -393,29 +393,33 @@ ROLLBACK;
 
       schema_rows.forEach((r) => {
         const { schema_name, is_deleted, commit_id } = r;
+        const commit = new Commit(commit_id);
         if (is_deleted) {
           delete schema_map[schema_name];
         } else {
           schema_map[schema_name] = {
             schema_name,
-            commit_id,
+            commit,
+            table_map: {},
           };
         }
       });
       table_rows.forEach((r) => {
         const { schema_name, table_name, is_deleted, commit_id } = r;
-        const schema_table = schema_name + "." + table_name;
-        if (is_deleted) {
-          delete table_map[schema_table];
-        } else {
-          const schema = schema_map[schema_name];
-          if (schema && schema.commit_id <= commit_id) {
-            table_map[schema_table] = {
-              schema_table,
-              schema_name,
-              table_name,
-              commit_id,
-            };
+        const schema = schema_map[schema_name];
+        const commit = new Commit(commid_id);
+        if (schema) {
+          if (is_deleted) {
+            delete schema.table_map[schema_table];
+          } else {
+            if (schema.commit.isLTE(commit)) {
+              schema.table_map[table_name] = {
+                schema_table,
+                schema_name,
+                table_name,
+                commit,
+              };
+            }
           }
         }
       });

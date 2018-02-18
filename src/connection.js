@@ -7,6 +7,7 @@ const Commit = require('./commit.js');
 const data_store = require('./data_store.js');
 const Database = require('./database.js');
 const pg_errors = require('./pg_errors.js');
+const query_engine = require('./query_engine.js');
 
 const {
   DB_CONNECT_SPEC_REGEX,
@@ -244,6 +245,10 @@ Connection.prototype._executeStatement = function(statement,done) {
       this._database.createTable(params,err => {
         done(err,{ cmd: "CREATE TABLE" });
       });
+      break;
+    }
+    case "select": {
+      query_engine.runQuery(params,done);
       break;
     }
     default: {

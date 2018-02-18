@@ -68,6 +68,15 @@ Commit.prototype.getCommitNumber = function() {
 Commit.prototype.isEqual = function(b) {
   return this._commit_id === b._commit_id;
 };
+Commit.prototype.isLTE = function(b) {
+  return (
+    this._branch_number < b._branch_number
+    || (
+      this._branch_number == b._branch_number
+      && this._commit_number <= b._commit_number
+    )
+  );
+};
 
 Commit.prototype.nextHash = function(next_log) {
   const hash = crypto.createHash('sha512');

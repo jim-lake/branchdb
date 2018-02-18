@@ -10,6 +10,7 @@ const {
   LABEL_NAME_REGEX,
   COMMIT_HASH_REGEX,
   SCHEMA_NAME_REGEX,
+  BUILT_IN_SCHEMA,
 } = require('./constants.js');
 
 module.exports = Database;
@@ -234,11 +235,6 @@ Database.prototype._extendSchema = function(base_schema,transaction) {
           break;
         case 'DROP_SCHEMA':
           delete ret.schema_map[name];
-          _.each(ret.table_map,(t,schema_table) => {
-            if (t.schema_name == name) {
-              delete ret.table_map[schema_table];
-            }
-          });
           break;
         default:
           console.error("Database._extendSchema: unhandled schema_update:",op);
@@ -246,6 +242,7 @@ Database.prototype._extendSchema = function(base_schema,transaction) {
       }
     }
   });
+  _.merge(ret,BUILT_IN_SCHEMA);
 
   return ret;
 };

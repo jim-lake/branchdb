@@ -78,6 +78,16 @@ exports.COMMIT_CONFLICT_ERROR = {
   code: SQLSTATE_ERROR_CODE_MAP.exclusion_violation,
   message: "Transaction conflict",
 };
+exports.UNKNOWN_TABLE_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.undefined_table,
+  message: "Undefined table",
+};
+exports.UNKNOWN_SCHEMA_ERROR = {
+  severity: 'ERROR',
+  code: SQLSTATE_ERROR_CODE_MAP.invalid_schema_name,
+  message: "Undefined schema",
+};
 
 function internal(err) {
   const new_error = _.extend({},exports.INTERNAL_ERROR);
